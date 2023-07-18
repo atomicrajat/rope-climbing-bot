@@ -10,6 +10,7 @@ import numpy as np
 import time
 import RPi.GPIO as GPIO    # Import Raspberry Pi GPIO library
 from time import sleep     # Import the sleep function from the time module
+from gpiozero import AngularServo
 
 #Picamera2 for raspberry pi Bullseye (Comment this for Buster) 
 #from picamera2.encoders import H264Encoder
@@ -24,25 +25,25 @@ from picamera import PiCamera
 
 #Pin and Camera Initialization
 GPIO.setwarnings(False)    # Ignore warning for now
-GPIO.setmode(GPIO.BOARD)   # Use physical pin numbering
+GPIO.setmode(GPIO.BCM)   # Use physical pin numbering
 
 
 #Initialize motor diver pins using RPi.GPIO (Here)
 motor_pin1 = 23
 motor_pin2 = 24
-GPIO.setup(motor_pin1, GPIO.OUT)
-GPIO.setup(motor_pin2, GPIO.OUT)
+motor_speed_pin = 25
+GPIO.setup(motor_pin1, GPIO.OUT, initial=GPIO.LOW)
+GPIO.setup(motor_pin2, GPIO.OUT, initial=GPIO.LOW)
+GPIO.setup(motor_speed_pin, GPIO.OUT)
+speed_control = GPIO.PWM(motor_speed_pin,1000)
 
 #Initialize servo motor for package dropping
-
-
-#Initialize IR sensor for detecting the zone
-ir_sensor_pin = 5
-GPIO.setup(ir_sensor_pin, GPIO.IN)
-
+servo_pin = 12 #its a PWM pin
+servo = AngularServo(servo_pin, min_pulse_width=0.0006,max_pulse_width=0.0023)
 
 #Example for setting led for demo
-GPIO.setup(8, GPIO.OUT, initial=GPIO.LOW)   # Set pin 8 to be an output pin and set initial value to low (off)
+led_pin = 5
+GPIO.setup(led_pin, GPIO.OUT, initial=GPIO.LOW)   # Set pin 5 to be an output pin and set initial value to low (off)
 
 #Camera initialization
 #input size
@@ -64,8 +65,13 @@ rawCapture = PiRGBArray(picam,size=(w,h))
 
 ##############################################################################################
 #variables
-zone = 0
-target_zone = 4
+zone_interval = 5 #indicates the seconds to reach next zone (change it accordingly)
+capture_interval = 3 #indicates the seconds to scan the area and capture the frame (change accordingly)
+load_interval = 10 #indicates the seconds to load the package back into servo
+dropped = False
+speed = 25 #speed of the motor (change accordingly [L:25, M:50, H:75])
+zone = 1
+target_zone = 3
 img_size = 416
 conf_thres = 0.70
 iou_thres = 0.45
@@ -91,8 +97,9 @@ size = (img_size,img_size)
 #Functions to capture and process the image
 
 def capture_and_process_image(zone):
+    global dropped
     print("Scanning the area")
-    sleep(3)
+    sleep(capture_interval)
     #Capture the frame in YUV420 Format and convert to RGB (Bullseye)
     #yuv420 = picam.capture_array()
     #frame = cv2.cvtColor(yuv420, cv2.COLOR_YUV420p2RGB)
@@ -114,7 +121,7 @@ def capture_and_process_image(zone):
     
     if "person" in result_class_names:
         #set the led Indicator HIGH
-        GPIO.output(8, GPIO.HIGH)
+        GPIO.output(led_pin, GPIO.HIGH)
         
         #Print the info
         print(f"[ALERT] Total {result_class_names.count('person')} Persons Detected In Zone {zone}")
@@ -133,12 +140,15 @@ def capture_and_process_image(zone):
         #send_msg_with_image(frame)
         
         #trigger the servo and drop the package
-        
+        if not dropped:
+            dropped = drop_package()
+        else:
+            print("[Package already dropped]")
         
         #set the led Indicator LOW
-        GPIO.output(8, GPIO.LOW)
+        GPIO.output(led_pin, GPIO.LOW)
     else:
-        GPIO.output(8, GPIO.LOW)
+        GPIO.output(led_pin, GPIO.LOW)
         print(f"No Person Detected In Zone {zone}")
         
 # Function to move the bot forward       
@@ -157,53 +167,26 @@ def move_backward():
 def stop_bot():
     GPIO.output(motor_pin1, GPIO.LOW)
     GPIO.output(motor_pin2, GPIO.LOW)
-    print("Bot is stopped")       
+    print("Bot is stopped") 
+
+def drop_package():
+    print("droping package..")
+    servo.angle = 90
+    return True      
     
 
 
 ########################################################################################################
 
 #start the Bot
-move_forward()
-
-###################################################---With all sensors---########################################
-#Check for zones
-# try:
-#     while True:
-#         ir_sensor_pin_value = GPIO.input(ir_sensor1_pin) #read the ir sensor
-        
-#         if ir_sensor_pin_value == 0:                     #when black strip i.e Zone encountered
-#             print(f"Zone {zone} Reached")
-#             stop_bot()                                  #Stop the bot
-#             capture_and_process_image(zone)            #Check for person
-#             #If bot reaches the last zone
-#             if zone == target_zone:                      #If its last zone return to base 
-#                 print("Reached last zone, returning..")
-#                 if path == "forward":
-#                     path = "backward"
-#                     target_zone = 0
-#                 elif path == "backward":
-#                     path = "forward"
-#                     target_zone = 4
-
-#             if path == "forward":
-#                 move_forward()                         #else move forward to next zone if path is forward
-#                 zone=zone+1
-#             elif path == "backward":
-#                 move_backward()                        #move backward to next zone if path is backward
-#                 zone=zone-1
-#             else:
-#                 stop_bot()
-#         else:
-#             print("Moving to next zone...")
-            
-###################################################################################################################
+speed_control.start(speed) #set the speed of the motor before moving forward 
+move_forward() #start the bot and move forward
 
 ########################################---Simulation---###########################################################    
 try:
     while True:
         print("Moving to next zone")
-        sleep(5)
+        sleep(zone_interval)
         print(f"Zone {zone} Reached")
         stop_bot()
         capture_and_process_image(zone)
@@ -212,9 +195,13 @@ try:
             if path == "forward":
                 path = "backward"
                 target_zone = 0
+                servo.angle = 0 #change the servo angle back to 0 degree when the bot reaches back to zone 0 (initial place)
+                dropped = False #setting the dropped variable back to False when it reaches initial place
+                print("Loading the package")
+                sleep(load_interval)
             elif path == "backward":
                 path = "forward"
-                target_zone = 4
+                target_zone = 3
         if path == "forward":
             move_forward()                         #else move forward to next zone if path is forward
             zone=zone+1
